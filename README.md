@@ -1,5 +1,14 @@
 
-# innoextract - A tool to unpack installers created by Inno Setup
+## modified innoextract - can extract galaxy data from new GOG installers
+
+gog forum thread: https://www.gog.com/forum/general/adamhms_linux_wine_wrappers_news_faq_discussion/post127
+
+
+
+
+************* original readme ****************
+
+## innoextract - A tool to unpack installers created by Inno Setup
 
 [Inno Setup](http://www.jrsoftware.org/isinfo.php) is a tool to create installers for Microsoft Windows applications. innoextract allows to extract such installers under non-Windows systems without running the actual installer using wine. innoextract currently supports installers created by Inno Setup 1.2.10 to 5.5.5.
 
