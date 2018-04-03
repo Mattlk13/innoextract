@@ -71,7 +71,8 @@ struct extract_options {
 	setup::filename_map filenames;
 	CollisionAction collisions;
 	std::string default_language;
-	
+
+	std::string gog_lang, gog_winver, gog_osbits;
 	boost::filesystem::path output_dir;
 	
 };

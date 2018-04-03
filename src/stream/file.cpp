@@ -21,7 +21,7 @@
 #include "stream/file.hpp"
 
 #include <boost/iostreams/filtering_stream.hpp>
-
+#include <boost/iostreams/filter/zlib.hpp>
 #include "stream/checksum.hpp"
 #include "stream/exefilter.hpp"
 #include "stream/restrict.hpp"
@@ -51,10 +51,14 @@ bool file::operator==(const file & o) const {
 
 
 file_reader::pointer file_reader::get(base_type & base, const file & file,
-                                      crypto::checksum * checksum) {
+                                      crypto::checksum * checksum, bool deflate) {
 	
 	util::unique_ptr<io::filtering_istream>::type result(new io::filtering_istream);
 	
+	if(deflate) {
+		result->push(io::zlib_decompressor(), 8192);
+	}
+
 	if(checksum) {
 		result->push(stream::checksum_filter(checksum, file.checksum.type), 8192);
 	}

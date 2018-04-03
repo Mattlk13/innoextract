@@ -91,7 +91,7 @@ public:
 	 *
 	 * \return a pointer to a non-seekable input stream for the requested file.
 	 */
-	static pointer get(base_type & base, const file_t & file, crypto::checksum * checksum);
+	static pointer get(base_type & base, const file_t & file, crypto::checksum * checksum, bool deflate);
 	
 };
 

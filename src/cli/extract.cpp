@@ -119,9 +119,12 @@ struct file_output {
 	fs::path name;
 	util::ofstream stream;
 	
-	explicit file_output(const fs::path & file) : name(file) {
+	explicit file_output(const fs::path & file, boost::uint64_t offset = 0) : name(file) {
 		try {
-			stream.open(name, std::ios_base::out | std::ios_base::binary | std::ios_base::trunc);
+			std::ios_base::openmode mode = std::ios_base::out | std::ios_base::binary;
+			if(offset == 0) mode |= std::ios_base::trunc;
+			else mode |= std::ios_base::app;
+			stream.open(name, mode);
 			if(!stream.is_open()) {
 				throw 0;
 			}
@@ -132,35 +135,60 @@ struct file_output {
 	
 };
 
+
+struct gx_file {
+	std::string path;
+
+	unsigned long num_parts;
+	boost::uint64_t total_size;
+	std::string checksum;
+};
+
+
+struct gx_chunk {
+	std::string checksum;
+	boost::uint64_t size_packed, size;
+
+	std::string lang, bitness, winver;
+
+	boost::uint64_t offset;
+	struct gx_file *file;
+};
+
 template <typename Entry>
 class processed_item {
 	
 	std::string path_;
 	const Entry * entry_;
 	bool implied_;
-	
+public: //FIXME
+	struct gx_chunk *gx_;
+
 public:
 	
-	processed_item() : entry_(NULL), implied_(false) { }
+	processed_item() : entry_(NULL), implied_(false), gx_(NULL) { }
 	
-	processed_item(const Entry * entry, const std::string & path, bool implied = false)
-		: path_(path), entry_(entry), implied_(implied) { }
+	processed_item(const Entry * entry, const std::string & path, struct gx_chunk *gx = NULL, bool implied = false)
+		: path_(path), entry_(entry), implied_(implied), gx_(gx) { }
 	
 	processed_item(const std::string & path, bool implied = false)
-		: path_(path), entry_(NULL), implied_(implied) { }
+		: path_(path), entry_(NULL), implied_(implied), gx_(NULL) { }
 		
 	processed_item(const processed_item & o)
-		: path_(o.path_), entry_(o.entry_), implied_(o.implied_) { }
+		: path_(o.path_), entry_(o.entry_), implied_(o.implied_), gx_(o.gx_) { }
 	
 	bool has_entry() const { return entry_ != NULL; }
 	const Entry & entry() const { return *entry_; }
-	const std::string & path() const { return path_; }
+	const std::string & path() const { return gx_ ? gx_->file->path :  path_; }
+	boost::uint64_t offset() const { return gx_ ? gx_->offset : 0; }
 	bool implied() const { return implied_; }
-	
+	bool has_gxchunk() const { return gx_ != NULL; }
+	const struct gx_chunk& gxchunk() const { return *gx_;}
+
 	void set_entry(const Entry * entry) { entry_ = entry; }
 	void set_path(const std::string & path) { path_ = path; }
 	void set_implied(bool implied) { implied_ = implied; }
-	
+	void set_gxchunk(struct gx_chunk *gx) { gx_ = gx; }
 };
 
 typedef processed_item<setup::file_entry> processed_file;
@@ -211,7 +239,7 @@ public:
 static void print_filter_info(const setup::item & item, bool temp) {
 	
 	bool first = true;
-	
+
 	if(!item.languages.empty()) {
 		std::cout << (first ? " [" : ", ");
 		first = false;
@@ -224,11 +252,151 @@ static void print_filter_info(const setup::item & item, bool temp) {
 		std::cout << color::cyan << "temp" << color::reset;
 		
 	}
-	
+
 	if(!first) {
 		std::cout << "]";
 	}
 }
+
+// constraint: keyA#keyB#keyC#   or !keyF#
+static bool check_constraint(const std::string &key, const std::string &constraint)
+{
+	if(constraint.empty()) return true;
+	if(key.compare("*")==0) return true;
+
+	unsigned long p = 0;
+
+	while(p < constraint.size())
+	{
+		bool valid = true;
+		if(constraint[p] == '!') {
+			valid = false;
+			p++;
+		}
+		unsigned long e = constraint.find('#',p);
+
+		if(e == std::string::npos) e = constraint.size();
+		if( (constraint.compare(p, e-p, key) == 0) == valid ) return true;
+
+		p = e+1;
+	}
+	return false;
+}
+
+
+static std::string parse_quoted(const std::string s, long unsigned int pos, long unsigned int len)
+{
+
+	const std::string sub = s.substr(pos, len);
+	std::string::size_type st = sub.find('\'');
+	if(st != std::string::npos) {
+		st++;
+		std::string::size_type end = sub.find('\'', st);
+		if(end != std::string::npos) {
+			end--;
+			return sub.substr(st, end-st+1);
+		}
+	}
+	    throw 0;
+}
+
+
+static long unsigned parse_uint(const std::string s, long unsigned int pos, long unsigned int len)
+{
+	return std::stoul( s.substr(pos, len) );
+}
+
+
+static long unsigned int next_arg(const std::string &s, const long unsigned int pos)
+{
+	std::string::size_type n = s.find(',', pos);
+	if(n == std::string::npos)  n = s.find(')', pos);
+	if(n == std::string::npos) {
+		std::cout << "oops";
+		throw 0;
+	}
+	return n;
+}
+
+
+static struct gx_chunk* get_gog_info(const setup::file_entry &item)
+{
+	static const char before[] = "before_install(";
+	static const char after[] = "after_install(";
+	static const char check[] = "check_if_install(";
+
+	struct gx_chunk *ch = NULL;
+
+	if( item.after_install.compare(0, sizeof(after)-1, after) == 0) {
+		ch = new gx_chunk();
+	        ch->offset = 0;
+		ch->file = NULL;
+
+	        long unsigned int st = sizeof(after)-1;
+		long unsigned int end = next_arg(item.after_install, st);
+	        ch->checksum = parse_quoted(item.after_install, st, end-st+1);
+
+	        st = end + 1;
+		end = next_arg(item.after_install, st);
+	        ch->size_packed = parse_uint(item.after_install, st, end-st+1);
+
+		st = end + 1;
+	        end = next_arg(item.after_install, st);
+		ch->size = parse_uint(item.after_install, st, end-st+1);
+
+	//        std::cout << "parse:"<<item.after_install <<":"<<ch->checksum<<":"<<ch->size_packed<<":"<<ch->size<<"\n";
+	} else if( !item.after_install.empty())
+	        std::cout << "unhandled after install action: "<< item.after_install << "\n";
+
+
+	if( item.before_install.compare(0, sizeof(before)-1, before) == 0) {
+		if(!ch) {
+			std::cout << "missing after_install definition:\n";
+			return NULL;
+		}
+
+	        struct gx_file *file = new gx_file();
+
+		long unsigned int ss = sizeof(before)-1;
+	        long unsigned int end = next_arg(item.before_install, ss);
+		file->checksum = parse_quoted(item.before_install, ss, end-ss+1);
+
+	        ss = end + 1;
+		end = next_arg(item.before_install, ss);
+	        file->path = parse_quoted(item.before_install, ss, end-ss+1);
+
+		ss = end + 1;
+	        end = next_arg(item.before_install, ss);
+		file->num_parts = parse_uint(item.before_install, ss, end-ss+1);
+
+	        ch->file = file;
+		file->total_size = ch->size;
+	} else if( !item.before_install.empty() )
+	        std::cout << "unhandled before install action(" << item.before_install << "):" << item.destination << "\n";
+
+	if( item.check.compare(0, sizeof(check)-1, check) == 0) {
+		if(!ch) {
+	            std::cout << "missing gog data description:"<<item.before_install<<item.after_install<<item.check<<"\n";
+		    return NULL;
+	        }
+		long unsigned int ss = sizeof(check)-1;
+	        long unsigned int end = next_arg(item.check, ss);
+		ch->lang = parse_quoted(item.check, ss, end-ss+1);
+
+
+	        ss = end + 1;
+		end = next_arg(item.check, ss);
+	        ch->bitness = parse_quoted(item.check, ss, end-ss+1);
+
+		ss = end + 1;
+	        end = next_arg(item.check, ss);
+		ch->winver = parse_quoted(item.check, ss, end-ss+1);
+	} else if( !item.check.empty() )
+	        std::cout << "unhandled check install action(" << item.check << "):" << item.destination << "\n";
+
+	return ch;
+}
+
 
 static void print_filter_info(const setup::file_entry & file) {
 	bool is_temp = !!(file.options & setup::file_entry::DeleteAfterInstall);
@@ -240,13 +408,30 @@ static void print_filter_info(const setup::directory_entry & dir) {
 	print_filter_info(dir, is_temp);
 }
 
-static void print_size_info(const stream::file & file) {
+static void print_size_info(const stream::file & file, boost::uint64_t packed=0, boost::uint64_t size=0) {
 	
 	if(logger::debug) {
 		std::cout << " @ " << print_hex(file.offset);
 	}
 	
-	std::cout << " (" << color::dim_cyan << print_bytes(file.size) << color::reset << ")";
+	if(packed && size)
+		std::cout << " (" << color::dim_cyan << print_bytes(packed) << color::reset << " => " << color::dim_cyan << print_bytes(size) <<color::reset << ") ";
+	else
+		std::cout << " (" << color::dim_cyan << print_bytes(file.size) << color::reset << ")";
+
+}
+
+
+static void print_gx_info(struct gx_chunk *gx)
+{
+	if(!gx) return;
+
+	if(!gx->lang.empty())
+		std::cout << " {"<<gx->lang<<"} ";
+	if(!gx->bitness.empty() && (gx->bitness.compare("32#64#")!=0) )
+		std::cout << " {"<<gx->bitness<<"} ";
+	if(!gx->winver.empty())
+		std::cout << " {"<<gx->winver<<"}";
 }
 
 static bool prompt_overwrite() {
@@ -617,6 +802,7 @@ void process_file(const fs::path & file, const extract_options & o) {
 	}
 	
 	FilesMap processed_files;
+	std::list<processed_file> dummy_files;
 	#if BOOST_VERSION >= 105000
 	processed_files.reserve(info.files.size());
 	#endif
@@ -645,7 +831,7 @@ void process_file(const fs::path & file, const extract_options & o) {
 		} else if(o.language_only) {
 			continue; // Ignore language-agnostic dirs
 		}
-		
+	        //std::cout << "dir:"<< directory.name<<":"<<directory.check<<":"<<directory.before_install<<"\n";
 		std::string path = o.filenames.convert(directory.name);
 		if(path.empty()) {
 			continue; // Don't know what to do with this
@@ -672,6 +858,10 @@ void process_file(const fs::path & file, const extract_options & o) {
 		it->second.set_entry(&directory);
 	}
 	
+
+	unsigned long rem_parts = 0;
+	struct gx_file *gxfile = NULL;
+
 	// Filter the files to be extracted
 	BOOST_FOREACH(const setup::file_entry & file, info.files) {
 		
@@ -695,24 +885,65 @@ void process_file(const fs::path & file, const extract_options & o) {
 		if(path.empty()) {
 			continue; // Internal file, not extracted
 		}
-		std::string internal_path = boost::algorithm::to_lower_copy(path);
-		
-		bool path_included = includes.match(internal_path);
-		
-		insert_dirs(processed_directories, includes, internal_path, path, path_included);
-		
-		if(!path_included) {
-			continue; // Ignore excluded file
+
+		struct gx_chunk *ch = NULL;
+		if( o.gog ) ch = get_gog_info(file);
+
+		if(ch) {
+			if(!ch->file) {
+				if(!gxfile || (rem_parts < 1) ) {
+					std::cout << "oops\n";
+					continue;
+				}
+				ch->offset = gxfile->total_size;
+				ch->file = gxfile;
+				gxfile->total_size += ch->size;
+				rem_parts--;
+				if(rem_parts == 0) gxfile=NULL;
+			} else {
+				if(ch->file->num_parts > 1) {
+					if(rem_parts > 0) {
+						std::cout << "oopsie\n";
+					}
+					gxfile = ch->file;
+					rem_parts = ch->file->num_parts - 1;
+				}
+			}
+
+			/*std::cout << "f:"<<file.destination<<" => "<<ch->file->path<<"@"<<ch->offset<<"\n";
+			std::cout << "lang:"<<ch->lang<<"="<<check_constraint("en-US", ch->lang)<<" bit:"<<ch->bitness<<"="<<check_constraint("64",ch->bitness)<<" winver:"<<ch->winver<<"="<<check_constraint("win7", ch->winver)<<"\n";*/
+
+			if( !check_constraint(o.gog_lang, ch->lang)
+			   || !check_constraint(o.gog_osbits, ch->bitness)
+			   || !check_constraint(o.gog_winver, ch->winver) ) {
+//				std::cout << "skpped\n";
+	                        continue;
+		        }
+			path = ch->file->path;
 		}
-		
+
+		std::string internal_path = boost::algorithm::to_lower_copy(path);
+
+		bool path_included = includes.match(internal_path);
+		insert_dirs(processed_directories, includes, internal_path, path, path_included);
+		if(!path_included) {
+		    continue; // Ignore excluded file
+		}
+
 		std::pair<FilesMap::iterator, bool> insertion = processed_files.insert(std::make_pair(
-			internal_path, processed_file(&file, path)
+			internal_path, processed_file(&file, path, ch)
 		));
 		
 		if(!insertion.second) {
 			// Collision!
 			processed_file & existing = insertion.first->second;
-			
+
+			if( existing.has_gxchunk() && (existing.gxchunk().file == ch->file) ) {
+				// no collision handling
+				dummy_files.push_back( processed_file(&file, path, ch) );
+				continue;
+			}
+
 			if(o.collisions == ErrorOnCollisions) {
 				throw std::runtime_error("Collision: " + path);
 			} else if(o.collisions == RenameAllCollisions) {
@@ -743,6 +974,7 @@ void process_file(const fs::path & file, const extract_options & o) {
 					std::cout << '"' << color::dim_yellow << clobberedpath << color::reset << '"';
 					print_filter_info(skip ? file : existing.entry());
 					if(!o.quiet) {
+						print_gx_info(skip ? existing.gx_ : ch);
 						print_size_info(skip ? newdata.file : olddata.file);
 					}
 					std::cout << " - " << (skip ? skip : "overwritten") << '\n';
@@ -814,6 +1046,10 @@ void process_file(const fs::path & file, const extract_options & o) {
 		const processed_file & file = i.second;
 		files_for_location[file.entry().location].push_back(&file);
 	}
+
+	BOOST_FOREACH(const processed_file &file, dummy_files) {
+		files_for_location[file.entry().location].push_back(&file);
+	}
 	
 	boost::uint64_t total_size = 0;
 	size_t max_slice = 0;
@@ -850,13 +1086,13 @@ void process_file(const fs::path & file, const extract_options & o) {
 	}
 	
 	progress extract_progress(total_size);
-	
+
 	BOOST_FOREACH(const Chunks::value_type & chunk, chunks) {
 		
 		debug("[starting " << chunk.first.compression << " chunk @ slice " << chunk.first.first_slice
 		      << " + " << print_hex(offsets.data_offset) << " + " << print_hex(chunk.first.offset)
 		      << ']');
-		
+	        //std::cout << "[chunk:] " << chunk.first.compression << "\n";
 		if(chunk.first.encrypted) {
 			log_warning << "Skipping encrypted chunk (unsupported)";
 		}
@@ -888,9 +1124,15 @@ void process_file(const fs::path & file, const extract_options & o) {
 					
 					std::cout << " - ";
 					bool named = false;
+					boost::uint64_t packed=0,size=0;
 					BOOST_FOREACH(const processed_file * name, names) {
 						if(named) {
 							std::cout << ", ";
+						}
+						if(name->has_gxchunk()) {
+							if(name->offset() > 0) std::cout << "++";
+							size = name->gxchunk().size;
+							packed = name->gxchunk().size_packed;
 						}
 						if(chunk.first.encrypted) {
 							std::cout << '"' << color::dim_yellow << name->path() << color::reset << '"';
@@ -898,13 +1140,15 @@ void process_file(const fs::path & file, const extract_options & o) {
 							std::cout << '"' << color::white << name->path() << color::reset << '"';
 						}
 						print_filter_info(name->entry());
+						print_gx_info(name->gx_);
 						named = true;
 					}
 					if(!named) {
 						std::cout << color::white << "unnamed file" << color::reset;
 					}
+
 					if(!o.quiet) {
-						print_size_info(file);
+						print_size_info(file, packed,size);
 					}
 					if(chunk.first.encrypted) {
 						std::cout << " - encrypted";
@@ -938,10 +1182,14 @@ void process_file(const fs::path & file, const extract_options & o) {
 			}
 			
 			crypto::checksum checksum;
-			
+			bool packed = false;
+			BOOST_FOREACH(const processed_file * name, names) {
+				if( name->has_gxchunk() ) packed = true;
+			}
+
 			// Open input file
 			stream::file_reader::pointer file_source;
-			file_source = stream::file_reader::get(*chunk_source, file, &checksum);
+			file_source = stream::file_reader::get(*chunk_source, file, &checksum, packed);
 			
 			// Open output files
 			boost::ptr_vector<file_output> output;
@@ -949,7 +1197,8 @@ void process_file(const fs::path & file, const extract_options & o) {
 				output.reserve(names.size());
 				BOOST_FOREACH(const processed_file * name, names) {
 					try {
-						output.push_back(new file_output(o.output_dir / name->path()));
+						//std::cout << "out:"<<name->path()<<"@"<<name->offset()<<"\n";
+						output.push_back(new file_output(o.output_dir / name->path(), name->offset()));
 					} catch(boost::bad_pointer &) {
 						// should never happen
 						std::terminate();

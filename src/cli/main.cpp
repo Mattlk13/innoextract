@@ -144,7 +144,10 @@ int main(int argc, char * argv[]) {
 		("lowercase,L", "Convert extracted filenames to lower-case")
 		("timestamps,T", po::value<std::string>(), "Timezone for file times or \"local\" or \"none\"")
 		("output-dir,d", po::value<std::string>(), "Extract files into the given directory")
-		("gog,g", "Extract additional archives from GOG.com installers")
+		("gog,g", "Extract galaxy data or additional archives from GOG.com installers")
+		("lang", po::value<std::string>(), "extract only data for this language from GOG installers (default: en-US)")
+		("winver", po::value<std::string>(), "extract only data for this win version from GOG installers (default: win7)")
+		("osbits", po::value<std::string>(), "extract only data for this os type from GOG installers(values: 32,64 default: 64)")
 	;
 	
 	po::options_description filter("Filters");
@@ -361,7 +364,19 @@ int main(int argc, char * argv[]) {
 	}
 	
 	o.gog = (options.count("gog") != 0);
-	
+	{
+	    po::variables_map::const_iterator i = options.find("lang");
+	    o.gog_lang = (i!=options.end()) ? i->second.as<std::string>() : "en-US";
+	}
+	{
+	    po::variables_map::const_iterator i = options.find("winver");
+	    o.gog_winver = (i != options.end()) ? i->second.as<std::string>() : "win7";
+	}
+	{
+	    po::variables_map::const_iterator i = options.find("osbits");
+	    o.gog_osbits = (i != options.end()) ? i->second.as<std::string>() : "64";
+	}
+
 	const std::vector<std::string> & files = options["setup-files"]
 	                                         .as< std::vector<std::string> >();
 	
