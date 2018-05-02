@@ -179,7 +179,7 @@ public:
 	
 	bool has_entry() const { return entry_ != NULL; }
 	const Entry & entry() const { return *entry_; }
-	const std::string & path() const { return gx_ ? gx_->file->path :  path_; }
+	const std::string & path() const { return path_; }
 	boost::uint64_t offset() const { return gx_ ? gx_->offset : 0; }
 	bool implied() const { return implied_; }
 	bool has_gxchunk() const { return gx_ != NULL; }
@@ -919,7 +919,7 @@ void process_file(const fs::path & file, const extract_options & o) {
 //				std::cout << "skpped\n";
 	                        continue;
 		        }
-			path = ch->file->path;
+			path = o.filenames.convert(ch->file->path);
 		}
 
 		std::string internal_path = boost::algorithm::to_lower_copy(path);
